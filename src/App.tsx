@@ -7,6 +7,7 @@ import { loadAiSettings, loadCandidates, saveAiSettings } from './utils/storage'
 import { analyzeCandidateWithSettings } from './utils/realAi'
 import { cleanPosition, extractResumeInfo, getExtractedFieldLabels } from './utils/resumeExtractor'
 import { cleanResumeText, parseResumeFile } from './utils/resumeParser'
+import { formatDateTime } from './utils/date'
 import {
   createCandidate as createCandidateRecord,
   deleteCandidate as deleteCandidateRecord,
@@ -856,8 +857,8 @@ function CandidatesView(props: {
                 const interviewTime = formatDateTime(candidate.interviewTime)
                 const interviewer = candidate.interviewer || '待安排'
                 const resumeSource = getResumeSourceLabel(candidate.resumeImportType, candidate.resumeFileName)
-                const resumeImportedAt = formatBusinessTime(candidate.resumeImportedAt)
-                const updatedAt = formatBusinessTime(candidate.updatedAt)
+                const resumeImportedAt = formatDateTime(candidate.resumeImportedAt)
+                const updatedAt = formatDateTime(candidate.updatedAt)
 
                 return (
                   <tr key={candidate.id}>
@@ -982,11 +983,11 @@ function CandidateDetailDrawer({
             <ProfileField label="面试结果" value={statusLabels[candidate.status]} />
             <ProfileField label="匹配度" value={`${candidate.matchScore ?? '-'} / 100`} />
             <ProfileField label="试用期" value={probationLabels[candidate.probationStatus ?? 'not_started']} />
-            <ProfileField label="创建时间" value={formatBusinessTime(candidate.createdAt)} />
-            <ProfileField label="最近更新时间" value={formatBusinessTime(candidate.updatedAt)} />
-            <ProfileField label="简历导入时间" value={formatBusinessTime(candidate.resumeImportedAt)} />
-            <ProfileField label="状态更新时间" value={formatBusinessTime(candidate.statusUpdatedAt)} />
-            <ProfileField label="AI 分析时间" value={formatBusinessTime(candidate.aiUpdatedAt)} />
+            <ProfileField label="创建时间" value={formatDateTime(candidate.createdAt)} />
+            <ProfileField label="最近更新时间" value={formatDateTime(candidate.updatedAt)} />
+            <ProfileField label="简历导入时间" value={formatDateTime(candidate.resumeImportedAt)} />
+            <ProfileField label="状态更新时间" value={formatDateTime(candidate.statusUpdatedAt)} />
+            <ProfileField label="AI 分析时间" value={formatDateTime(candidate.aiUpdatedAt)} />
           </div>
         </section>
 
@@ -1110,15 +1111,15 @@ function CandidateProfilePanel({
         <ProfileField label="来源" value={candidate.source} />
         <ProfileField label="面试时间" value={formatDateTime(candidate.interviewTime)} />
         <ProfileField label="面试官" value={candidate.interviewer || '待安排'} />
-        <ProfileField label="报到时间" value={candidate.onboardDate || '未记录'} />
+        <ProfileField label="报到时间" value={formatDateTime(candidate.onboardDate)} />
         <ProfileField label="匹配度评分" value={`${candidate.matchScore ?? 0}/100`} />
         <ProfileField label="是否建议进入下一轮" value={candidate.nextRoundRecommendation ?? '待分析'} />
         <ProfileField label="推荐面试结论" value={candidate.recommendedConclusion ?? '待分析'} wide />
-        <ProfileField label="创建时间" value={formatBusinessTime(candidate.createdAt)} />
-        <ProfileField label="最近更新时间" value={formatBusinessTime(candidate.updatedAt)} />
-        <ProfileField label="简历导入时间" value={formatBusinessTime(candidate.resumeImportedAt)} />
-        <ProfileField label="状态更新时间" value={formatBusinessTime(candidate.statusUpdatedAt)} />
-        <ProfileField label="AI 分析时间" value={formatBusinessTime(candidate.aiUpdatedAt)} />
+        <ProfileField label="创建时间" value={formatDateTime(candidate.createdAt)} />
+        <ProfileField label="最近更新时间" value={formatDateTime(candidate.updatedAt)} />
+        <ProfileField label="简历导入时间" value={formatDateTime(candidate.resumeImportedAt)} />
+        <ProfileField label="状态更新时间" value={formatDateTime(candidate.statusUpdatedAt)} />
+        <ProfileField label="AI 分析时间" value={formatDateTime(candidate.aiUpdatedAt)} />
       </div>
 
       <label className="field-label">
@@ -1808,7 +1809,7 @@ function MvpNotes({
         <div>
           <h3>AI API 试用模式</h3>
           <p>
-            当前支持 Mock AI、默认 AI 服务代理和自定义 API Key 三种模式。默认 AI 服务通过 Cloudflare Worker 代理调用，前端不会暴露 DeepSeek API Key。
+            当前支持 Mock AI、默认 AI 服务代理和自定义 API Key 三种模式，可根据演示场景切换。
           </p>
         </div>
         <div className="mode-options">
@@ -1840,43 +1841,54 @@ function MvpNotes({
             自定义 API Key
           </label>
         </div>
-        <div className="settings-grid">
-          <label>
-            默认代理地址
-            <input
-              value={settings.defaultProxyUrl}
-              onChange={(event) => updateSetting('defaultProxyUrl', event.target.value)}
-              placeholder="https://xxx.workers.dev/analyze"
-            />
-          </label>
-          <label>
-            API Key
-            <input
-              type="password"
-              value={settings.apiKey}
-              onChange={(event) => updateSetting('apiKey', event.target.value)}
-              placeholder="仅保存在当前浏览器 localStorage"
-            />
-          </label>
-          <label>
-            Base URL
-            <input
-              value={settings.baseUrl}
-              onChange={(event) => updateSetting('baseUrl', event.target.value)}
-              placeholder="https://api.openai.com/v1"
-            />
-          </label>
-          <label>
-            Model
-            <input
-              value={settings.model}
-              onChange={(event) => updateSetting('model', event.target.value)}
-              placeholder="deepseek-chat / gpt-4o-mini"
-            />
-          </label>
-        </div>
+        {settings.mode === 'default' && (
+          <div className="settings-grid single-setting">
+            <label>
+              默认代理地址
+              <input
+                value={settings.defaultProxyUrl}
+                onChange={(event) => updateSetting('defaultProxyUrl', event.target.value)}
+                placeholder="https://xxx.workers.dev/analyze"
+              />
+            </label>
+          </div>
+        )}
+        {settings.mode === 'custom' && (
+          <div className="settings-grid">
+            <label>
+              API Key
+              <input
+                type="password"
+                value={settings.apiKey}
+                onChange={(event) => updateSetting('apiKey', event.target.value)}
+                placeholder="仅保存在当前浏览器 localStorage"
+              />
+            </label>
+            <label>
+              Base URL
+              <input
+                value={settings.baseUrl}
+                onChange={(event) => updateSetting('baseUrl', event.target.value)}
+                placeholder="https://api.openai.com/v1"
+              />
+            </label>
+            <label>
+              Model
+              <input
+                value={settings.model}
+                onChange={(event) => updateSetting('model', event.target.value)}
+                placeholder="deepseek-chat / gpt-4o-mini"
+              />
+            </label>
+          </div>
+        )}
         <p className="settings-note">
-          默认 AI 服务只向代理传业务数据，不传 DeepSeek API Key。自定义 API Key 仅保存在当前浏览器本地。默认代理或自定义调用失败时，会自动回退 Mock AI 分析。
+          {settings.mode === 'mock' &&
+            '不调用真实模型，仅使用本地规则模拟 AI 分析流程。'}
+          {settings.mode === 'default' &&
+            '默认 AI 服务通过 Cloudflare Worker 代理调用，前端只发送简历、JD 和面试评价等业务数据，不保存也不暴露 DeepSeek API Key。'}
+          {settings.mode === 'custom' &&
+            '仅用于本地演示，API Key 保存在当前浏览器 localStorage，不建议用于正式环境。'}
         </p>
       </section>
       <div className="notes-grid">
@@ -2238,16 +2250,6 @@ function InfoBlock({ title, items }: { title: string; items: string[] }) {
       </ul>
     </section>
   )
-}
-
-function formatDateTime(value: string) {
-  if (!value) return '待安排'
-  return value.replace('T', ' ')
-}
-
-function formatBusinessTime(value?: string) {
-  if (!value) return '暂无'
-  return value.replace('T', ' ')
 }
 
 export default App

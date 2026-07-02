@@ -1706,6 +1706,10 @@ tbody tr.selected {
   gap: 12px;
 }
 
+.settings-grid.single-setting {
+  grid-template-columns: 1fr;
+}
+
 .settings-grid label {
   display: grid;
   gap: 7px;
