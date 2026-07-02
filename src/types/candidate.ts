@@ -7,7 +7,6 @@ export type CandidateStatus =
   | 'offer'
   | 'onboarded'
   | 'probation'
-  | 'archived'
 
 export type ProbationStatus =
   | 'not_started'
@@ -23,6 +22,14 @@ export type Candidate = {
   email?: string
   targetRole: string
   resumeText: string
+  resumeFileName?: string
+  resumeImportType?: 'paste' | 'upload' | 'file' | 'mock_parse'
+  resumeParsedInfo?: {
+    educationSummary?: string
+    skills?: string[]
+    projectSummary?: string
+  }
+  jdText?: string
   source: string
   interviewer: string
   interviewTime: string
@@ -33,11 +40,21 @@ export type Candidate = {
   weaknesses: string[]
   risks: string[]
   aiQuestions: string[]
+  matchScore?: number
+  nextRoundRecommendation?: string
+  recommendedConclusion?: string
+  aiRawTextResult?: string
+  aiFormatWarning?: string
+  aiUpdatedAt?: string
+  aiStale?: boolean
   resultNote?: string
   onboardDate?: string
   probationStatus?: ProbationStatus
-  createdAt: string
-  updatedAt: string
+  isArchived?: boolean
+  resumeImportedAt?: string
+  statusUpdatedAt?: string
+  createdAt?: string
+  updatedAt?: string
 }
 
 export type CandidateDraft = Omit<
@@ -54,7 +71,6 @@ export const statusLabels: Record<CandidateStatus, string> = {
   offer: '待报到',
   onboarded: '已报到',
   probation: '试用期',
-  archived: '已归档',
 }
 
 export const probationLabels: Record<ProbationStatus, string> = {
