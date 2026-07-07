@@ -1,10 +1,11 @@
-import { mockCandidates } from '../data/mockCandidates'
 import type { AiSettings } from '../types/ai'
 import type { Candidate, CandidateStatus } from '../types/candidate'
+import type { KnowledgeDocument } from '../types/knowledge'
 import { analyzeCandidate, hasUsefulResumeText } from './mockAi'
 
 const STORAGE_KEY = 'talentflow-ai:candidates'
 const AI_SETTINGS_KEY = 'talentflow-ai:ai-settings'
+const KNOWLEDGE_DOCUMENTS_KEY = 'talentflow-ai:knowledge-documents'
 
 export const defaultAiSettings: AiSettings = {
   mode: 'default',
@@ -14,43 +15,17 @@ export const defaultAiSettings: AiSettings = {
   model: 'gpt-4o-mini',
 }
 
-function cloneMockCandidates(): Candidate[] {
-  return mockCandidates.map((candidate) => ({
-    ...candidate,
-    isArchived: Boolean(candidate.isArchived),
-    resumeFileName: candidate.resumeFileName,
-    resumeImportType: candidate.resumeImportType ?? 'paste',
-    resumeParsedInfo: candidate.resumeParsedInfo ?? {},
-    jdText: candidate.jdText ?? '',
-    matchScore: candidate.matchScore,
-    nextRoundRecommendation: candidate.nextRoundRecommendation,
-    recommendedConclusion: candidate.recommendedConclusion,
-    aiRawTextResult: candidate.aiRawTextResult ?? '',
-    aiFormatWarning: candidate.aiFormatWarning ?? '',
-    aiUpdatedAt: candidate.aiUpdatedAt,
-    aiStale: Boolean(candidate.aiStale),
-    resumeImportedAt: candidate.resumeImportedAt,
-    statusUpdatedAt: candidate.statusUpdatedAt,
-    createdAt: candidate.createdAt,
-    updatedAt: candidate.updatedAt,
-    strengths: [...candidate.strengths],
-    weaknesses: [...candidate.weaknesses],
-    risks: [...candidate.risks],
-    aiQuestions: [...candidate.aiQuestions],
-  }))
-}
-
 export function loadCandidates(): Candidate[] {
   const raw = localStorage.getItem(STORAGE_KEY)
-  if (!raw) {
-    const initialCandidates = cloneMockCandidates()
-    saveCandidates(initialCandidates)
-    return initialCandidates
-  }
+  if (!raw) return []
 
   try {
     const parsed = JSON.parse(raw) as Candidate[]
-    if (!Array.isArray(parsed)) return cloneMockCandidates()
+    if (!Array.isArray(parsed)) return []
+    if (isBundledMockCandidateSet(parsed)) {
+      saveCandidates([])
+      return []
+    }
 
     const normalizedCandidates = normalizeStoredCandidates(parsed)
     if (JSON.stringify(normalizedCandidates) !== JSON.stringify(parsed)) {
@@ -58,7 +33,7 @@ export function loadCandidates(): Candidate[] {
     }
     return normalizedCandidates
   } catch {
-    return cloneMockCandidates()
+    return []
   }
 }
 
@@ -67,9 +42,8 @@ export function saveCandidates(candidates: Candidate[]) {
 }
 
 export function resetCandidates(): Candidate[] {
-  const initialCandidates = cloneMockCandidates()
-  saveCandidates(initialCandidates)
-  return initialCandidates
+  saveCandidates([])
+  return []
 }
 
 export function loadAiSettings(): AiSettings {
@@ -92,6 +66,26 @@ export function saveAiSettings(settings: AiSettings) {
   localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(settings))
 }
 
+export function loadKnowledgeDocuments(): KnowledgeDocument[] {
+  const raw = localStorage.getItem(KNOWLEDGE_DOCUMENTS_KEY)
+  if (!raw) return []
+
+  try {
+    const parsed = JSON.parse(raw) as KnowledgeDocument[]
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((document) => ({
+      ...document,
+      chunks: Array.isArray(document.chunks) ? document.chunks : [],
+    }))
+  } catch {
+    return []
+  }
+}
+
+export function saveKnowledgeDocuments(documents: KnowledgeDocument[]) {
+  localStorage.setItem(KNOWLEDGE_DOCUMENTS_KEY, JSON.stringify(documents))
+}
+
 function normalizeStoredCandidates(candidates: Candidate[]) {
   return candidates.map((candidate) => {
     const normalizedCandidate = normalizeArchivedStatus(candidate)
@@ -112,6 +106,12 @@ function normalizeStoredCandidates(candidates: Candidate[]) {
       ...analyzeCandidate({ targetRole: normalizedCandidate.targetRole, resumeText: normalizedCandidate.resumeText }),
     }
   })
+}
+
+function isBundledMockCandidateSet(candidates: Candidate[]) {
+  if (candidates.length === 0) return false
+  const bundledMockIds = new Set(['cand-001', 'cand-002', 'cand-003', 'cand-004', 'cand-005', 'cand-006', 'cand-007', 'cand-008'])
+  return candidates.every((candidate) => bundledMockIds.has(candidate.id))
 }
 
 function normalizeArchivedStatus(candidate: Candidate): Candidate {

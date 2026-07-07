@@ -3,10 +3,13 @@ import type { Session } from '@supabase/supabase-js'
 import type { AiSettings } from './types/ai'
 import type { Candidate, CandidateDraft, CandidateStatus, ProbationStatus } from './types/candidate'
 import { probationLabels, statusLabels } from './types/candidate'
-import { loadAiSettings, loadCandidates, saveAiSettings } from './utils/storage'
+import type { KnowledgeDocument, KnowledgeDocumentType, RagQuery } from './types/knowledge'
+import { knowledgeDocumentTypeLabels } from './types/knowledge'
+import { loadAiSettings, loadCandidates, loadKnowledgeDocuments, saveAiSettings, saveKnowledgeDocuments } from './utils/storage'
 import { analyzeCandidateWithSettings } from './utils/realAi'
 import { cleanPosition, extractResumeInfo, getExtractedFieldLabels } from './utils/resumeExtractor'
 import { cleanResumeText, parseResumeFile } from './utils/resumeParser'
+import { createKnowledgeDocument, queryKnowledgeBase, RAG_SYSTEM_PROMPT } from './utils/knowledgeRag'
 import { formatDateTime } from './utils/date'
 import {
   createCandidate as createCandidateRecord,
@@ -24,7 +27,7 @@ import {
   getSourceAnalytics,
 } from './utils/analytics'
 
-type ViewKey = 'dashboard' | 'candidates' | 'pipeline' | 'ai' | 'analytics' | 'notes'
+type ViewKey = 'dashboard' | 'candidates' | 'pipeline' | 'ai' | 'analytics' | 'knowledge' | 'notes'
 type StatusFilter = CandidateStatus | 'all' | 'archived'
 type ProbationFilter = ProbationStatus | 'all'
 type ArchiveFilter = 'all' | 'active' | 'archived'
@@ -35,6 +38,7 @@ const navigation: { key: ViewKey; label: string; icon: string }[] = [
   { key: 'pipeline', label: '面试流程', icon: '↳' },
   { key: 'ai', label: 'AI 分析', icon: '✦' },
   { key: 'analytics', label: '数据看板', icon: '◫' },
+  { key: 'knowledge', label: '招聘知识库', icon: '◎' },
   { key: 'notes', label: 'MVP 说明', icon: 'i' },
 ]
 
@@ -76,6 +80,7 @@ function App() {
   const [editing, setEditing] = useState<Candidate | null>(null)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [aiSettings, setAiSettings] = useState<AiSettings>(() => loadAiSettings())
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>(() => loadKnowledgeDocuments())
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [operationError, setOperationError] = useState('')
 
@@ -153,6 +158,11 @@ function App() {
   function updateAiSettings(nextSettings: AiSettings) {
     setAiSettings(nextSettings)
     saveAiSettings(nextSettings)
+  }
+
+  function persistKnowledgeDocuments(nextDocuments: KnowledgeDocument[]) {
+    setKnowledgeDocuments(nextDocuments)
+    saveKnowledgeDocuments(nextDocuments)
   }
 
   async function generateAnalysis(input: Pick<Candidate, 'targetRole' | 'resumeText'> & Partial<Candidate>) {
@@ -501,6 +511,13 @@ function App() {
             sourceAnalytics={sourceAnalytics}
             weeklyAnalytics={weeklyAnalytics}
             monthlyAnalytics={monthlyAnalytics}
+          />
+        )}
+
+        {activeView === 'knowledge' && (
+          <KnowledgeBaseView
+            documents={knowledgeDocuments}
+            onChange={persistKnowledgeDocuments}
           />
         )}
 
@@ -1784,6 +1801,330 @@ function PeriodPanel({ title, data }: { title: string; data: ReturnType<typeof g
   )
 }
 
+function KnowledgeBaseView({
+  documents,
+  onChange,
+}: {
+  documents: KnowledgeDocument[]
+  onChange: (documents: KnowledgeDocument[]) => void
+}) {
+  const [selectedId, setSelectedId] = useState(documents[0]?.id ?? '')
+  const [title, setTitle] = useState('')
+  const [type, setType] = useState<KnowledgeDocumentType>('JD')
+  const [content, setContent] = useState('')
+  const [question, setQuestion] = useState('')
+  const [ragResult, setRagResult] = useState<RagQuery | null>(null)
+  const [fileError, setFileError] = useState('')
+
+  const selectedDocument = documents.find((document) => document.id === selectedId) ?? null
+  const totalChunks = documents.reduce((sum, document) => sum + document.chunks.length, 0)
+
+  useEffect(() => {
+    if (!selectedDocument) return
+    setTitle(selectedDocument.title)
+    setType(selectedDocument.type)
+    setContent(selectedDocument.content)
+  }, [selectedDocument])
+
+  function resetForm() {
+    setSelectedId('')
+    setTitle('')
+    setType('JD')
+    setContent('')
+    setFileError('')
+  }
+
+  function saveDocument(event: FormEvent) {
+    event.preventDefault()
+    if (!title.trim() || !content.trim()) return
+
+    const nextDocument = createKnowledgeDocument({
+      title,
+      type,
+      content,
+      existingId: selectedDocument?.id,
+    })
+
+    if (selectedDocument) {
+      onChange(documents.map((document) => (document.id === selectedDocument.id ? nextDocument : document)))
+      setSelectedId(nextDocument.id)
+      return
+    }
+
+    onChange([nextDocument, ...documents])
+    setSelectedId(nextDocument.id)
+  }
+
+  async function importTextFile(file?: File) {
+    if (!file) return
+    setFileError('')
+    const lowerName = file.name.toLowerCase()
+    if (!lowerName.endsWith('.txt') && !lowerName.endsWith('.md')) {
+      setFileError('当前 MVP 仅支持 txt / md 文本文件，也可以直接粘贴文档内容。')
+      return
+    }
+
+    try {
+      const text = await file.text()
+      setTitle((current) => current || file.name.replace(/\.(txt|md)$/i, ''))
+      setContent(text)
+    } catch {
+      setFileError('文件读取失败，请改用手动粘贴文本。')
+    }
+  }
+
+  function deleteDocument(documentId: string) {
+    const document = documents.find((item) => item.id === documentId)
+    if (!document || !confirm(`确认删除知识文档“${document.title}”？相关知识片段也会一起删除。`)) return
+
+    const nextDocuments = documents.filter((item) => item.id !== documentId)
+    onChange(nextDocuments)
+    if (selectedId === documentId) {
+      setSelectedId(nextDocuments[0]?.id ?? '')
+      if (nextDocuments.length === 0) resetForm()
+    }
+    if (ragResult?.matchedChunks.some((chunk) => chunk.documentId === documentId)) {
+      setRagResult(null)
+    }
+  }
+
+  function askKnowledgeBase(event: FormEvent) {
+    event.preventDefault()
+    setRagResult(queryKnowledgeBase(question, documents))
+  }
+
+  return (
+    <section className="knowledge-page">
+      <div className="knowledge-hero panel">
+        <div>
+          <p className="eyebrow">招聘知识库 RAG MVP / 内部试用能力</p>
+          <h2>招聘知识库</h2>
+          <p>
+            上传 JD、面试标准、招聘 FAQ 等资料，系统可基于知识库回答 HR 问题，并展示引用来源，降低 AI 幻觉风险。
+          </p>
+        </div>
+        <div className="knowledge-stats">
+          <Metric label="知识文档" value={documents.length} hint="localStorage 本地保存" />
+          <Metric label="知识片段" value={totalChunks} hint="关键词检索模拟 RAG" />
+        </div>
+      </div>
+
+      <div className="knowledge-layout">
+        <aside className="panel knowledge-doc-list">
+          <div className="panel-header">
+            <div>
+              <h2>知识文档</h2>
+              <p>JD、面试标准、招聘 FAQ、岗位画像等。</p>
+            </div>
+            <button className="secondary" onClick={resetForm}>新增</button>
+          </div>
+          {documents.length === 0 ? (
+            <div className="empty-state compact">
+              <strong>请先上传 JD、面试标准或招聘 FAQ。</strong>
+              <span>当前不会使用真实候选人隐私数据作为默认示例。</span>
+            </div>
+          ) : (
+            <div className="knowledge-doc-items">
+              {documents.map((document) => (
+                <button
+                  key={document.id}
+                  className={selectedId === document.id ? 'knowledge-doc-item active' : 'knowledge-doc-item'}
+                  onClick={() => setSelectedId(document.id)}
+                >
+                  <strong>{document.title}</strong>
+                  <span>{knowledgeDocumentTypeLabels[document.type]} · {document.chunks.length} 个片段</span>
+                  <small>更新：{formatDateTime(document.updatedAt)}</small>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    className="danger-link"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      deleteDocument(document.id)
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.stopPropagation()
+                        deleteDocument(document.id)
+                      }
+                    }}
+                  >
+                    删除
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </aside>
+
+        <form className="panel knowledge-editor" onSubmit={saveDocument}>
+          <div className="panel-header">
+            <div>
+              <h2>{selectedDocument ? '编辑知识文档' : '新增知识文档'}</h2>
+              <p>保存时会自动切分为 chunks，用于后续问题检索。</p>
+            </div>
+          </div>
+          <div className="settings-grid">
+            <label>
+              文档标题
+              <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="如：AI 产品经理 JD / 试用期评价标准" />
+            </label>
+            <label>
+              文档类型
+              <select value={type} onChange={(event) => setType(event.target.value as KnowledgeDocumentType)}>
+                {Object.entries(knowledgeDocumentTypeLabels).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label className="wide-field">
+            上传 txt / md 文本
+            <input type="file" accept=".txt,.md,text/plain,text/markdown" onChange={(event) => importTextFile(event.target.files?.[0])} />
+          </label>
+          {fileError && <div className="parse-error">{fileError}</div>}
+          <label className="wide-field">
+            文档内容
+            <textarea
+              rows={11}
+              value={content}
+              onChange={(event) => setContent(event.target.value)}
+              placeholder="粘贴 JD、面试标准、招聘 FAQ、岗位画像、试用期评价标准或招聘流程说明。"
+            />
+          </label>
+          <div className="modal-actions">
+            <button type="button" className="secondary" onClick={resetForm}>清空</button>
+            <button className="primary" type="submit" disabled={!title.trim() || !content.trim()}>
+              保存并切片
+            </button>
+          </div>
+          {selectedDocument && (
+            <section className="chunk-preview">
+              <h3>知识片段</h3>
+              {selectedDocument.chunks.map((chunk) => (
+                <article key={chunk.id} className="chunk-card">
+                  <strong>{chunk.id}</strong>
+                  <p>{chunk.content}</p>
+                  <small>关键词：{chunk.keywords.slice(0, 12).join('、') || '暂无'}</small>
+                </article>
+              ))}
+            </section>
+          )}
+        </form>
+
+        <section className="panel rag-panel">
+          <div className="panel-header">
+            <div>
+              <h2>知识库问答</h2>
+              <p>优先基于知识片段回答，区分知识库依据和 AI 推断建议。</p>
+            </div>
+          </div>
+          <form className="rag-question" onSubmit={askKnowledgeBase}>
+            <textarea
+              rows={4}
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder="例如：这个岗位最核心的能力要求是什么？面试时应该重点追问哪些问题？"
+            />
+            <button className="primary" disabled={!question.trim()}>提问</button>
+          </form>
+          <details className="rag-prompt">
+            <summary>RAG 系统 Prompt</summary>
+            <pre>{RAG_SYSTEM_PROMPT}</pre>
+          </details>
+          {!ragResult ? (
+            <div className="empty-state compact">
+              <strong>输入招聘问题后开始检索。</strong>
+              <span>当前阶段使用关键词 / 简单相似度检索模拟 RAG 流程。</span>
+            </div>
+          ) : (
+            <div className="rag-result">
+              <div className={`confidence ${ragResult.confidence}`}>
+                置信提示：{getConfidenceLabel(ragResult.confidence)}
+              </div>
+              <div className="answer-sections">
+                <section className="answer-card">
+                  <h3>基于知识库的结论</h3>
+                  <p>{ragResult.answerSections.conclusion}</p>
+                </section>
+                <section className="answer-card">
+                  <h3>引用依据</h3>
+                  <p>{ragResult.answerSections.evidence}</p>
+                </section>
+                <section className="answer-card">
+                  <h3>AI 补充建议</h3>
+                  <p>{ragResult.answerSections.suggestion}</p>
+                </section>
+                <section className="answer-card warning-card">
+                  <h3>不确定项 / 需人工确认</h3>
+                  <p>{ragResult.answerSections.uncertainty}</p>
+                </section>
+              </div>
+              <section className="citation-list">
+                <h3>引用来源</h3>
+                {ragResult.citations.length === 0 ? (
+                  <p className="no-evidence">知识库中未找到足够依据，建议补充相关资料后再提问。</p>
+                ) : (
+                  ragResult.citations.map((citation) => (
+                    <article key={citation.chunkId} className="citation-card">
+                      <div className="citation-meta">
+                        <strong>{citation.documentTitle}</strong>
+                        <span>{knowledgeDocumentTypeLabels[citation.documentType]}</span>
+                        <span>{citation.chunkId}</span>
+                      </div>
+                      <p>{renderHighlightedText(citation.quote, ragResult.matchedKeywords)}</p>
+                    </article>
+                  ))
+                )}
+              </section>
+              <section className="chunk-preview">
+                <h3>命中的知识片段</h3>
+                {ragResult.matchedChunks.length === 0 ? (
+                  <p className="no-evidence">没有命中片段。</p>
+                ) : (
+                  ragResult.matchedChunks.map((chunk) => (
+                    <article key={chunk.id} className="chunk-card">
+                      <strong>{chunk.documentTitle} · {knowledgeDocumentTypeLabels[chunk.documentType]}</strong>
+                      <p>{renderHighlightedText(chunk.content, ragResult.matchedKeywords)}</p>
+                    </article>
+                  ))
+                )}
+              </section>
+            </div>
+          )}
+        </section>
+      </div>
+    </section>
+  )
+}
+
+function getConfidenceLabel(confidence: RagQuery['confidence']) {
+  if (confidence === 'high') return '高：找到多个相关片段，可作为较强依据。'
+  if (confidence === 'medium') return '中：找到部分相关片段，可作为初步参考。'
+  if (confidence === 'low') return '低：依据不足，仅能作为提示。'
+  return '无：知识库中未找到足够依据，不能生成确定结论。'
+}
+
+function renderHighlightedText(text: string, keywords: string[]) {
+  const effectiveKeywords = Array.from(
+    new Set(keywords.filter((keyword) => keyword.length >= 3 || /^[a-z0-9+#.]+$/i.test(keyword))),
+  )
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 12)
+
+  if (effectiveKeywords.length === 0) return text
+
+  const pattern = new RegExp(`(${effectiveKeywords.map(escapeRegExp).join('|')})`, 'gi')
+  return text.split(pattern).map((part, index) => {
+    const isMatch = effectiveKeywords.some((keyword) => keyword.toLowerCase() === part.toLowerCase())
+    return isMatch ? <mark key={`${part}-${index}`}>{part}</mark> : part
+  })
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function MvpNotes({
   settings,
   onSettingsChange,
@@ -1903,6 +2244,7 @@ function MvpNotes({
             <li>默认 AI 服务代理模式，前端不暴露 DeepSeek API Key</li>
             <li>编辑关键字段后标记 AI 分析可能过期，由用户手动重新生成</li>
             <li>招聘流程漏斗、来源质量、岗位、周度、月度招聘数据分析</li>
+            <li>招聘知识库 RAG MVP，支持文档管理、文本切片、关键词检索、带引用来源的问答兜底</li>
             <li>localStorage 本地试用模式，Supabase Auth / Database 内部试用模式</li>
           </ul>
         </div>
@@ -1912,6 +2254,7 @@ function MvpNotes({
             <li>不是商业化 SaaS，不做多租户、计费和复杂组织架构</li>
             <li>权限能力处于内部试用阶段，暂未完整实现面试官 / 管理者协作流程</li>
             <li>简历解析以浏览器本地文本提取为主，暂未接生产级文件存储和审计</li>
+            <li>招聘知识库当前使用关键词检索模拟 RAG，暂未接真实向量库和 Embedding 模型</li>
             <li>操作日志、通知中心和隐私合规流程仍需后续完善</li>
             <li>不使用真实候选人隐私数据做公开演示</li>
             <li>不允许将真实 API Key 写入前端代码或 GitHub 仓库</li>
@@ -1924,6 +2267,7 @@ function MvpNotes({
             <li>完善 operation_logs 操作记录和后台审计查看</li>
             <li>细化 admin / hr / interviewer 权限和 RLS 策略</li>
             <li>通过 Cloudflare Worker 或后端统一代理真实 AI API</li>
+            <li>招聘知识库可升级为 Supabase pgvector / Chroma / Pinecone 语义检索，并接入候选人 AI 评审依据选择</li>
             <li>增加面试官在线评价和管理者招聘进度看板</li>
             <li>对接企业微信 / 飞书通知</li>
             <li>增强候选人隐私保护、数据脱敏和访问日志</li>

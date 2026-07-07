@@ -1792,6 +1792,244 @@ tbody tr.selected {
   justify-content: flex-end;
 }
 
+.knowledge-page {
+  display: grid;
+  gap: 18px;
+}
+
+.knowledge-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+  gap: 18px;
+  align-items: center;
+}
+
+.knowledge-hero h2 {
+  margin: 2px 0 0;
+  font-size: 24px;
+}
+
+.knowledge-hero p {
+  margin: 8px 0 0;
+  max-width: 760px;
+  color: #344238;
+  line-height: 1.7;
+}
+
+.knowledge-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.knowledge-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(360px, 0.95fr) minmax(420px, 1.1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.knowledge-doc-list,
+.rag-panel {
+  position: sticky;
+  top: 24px;
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.knowledge-doc-items,
+.chunk-preview,
+.rag-result,
+.citation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.answer-sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.knowledge-doc-item {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--text);
+  text-align: left;
+}
+
+.knowledge-doc-item:hover,
+.knowledge-doc-item.active {
+  border-color: #b7c8ba;
+  background: var(--accent-soft);
+}
+
+.knowledge-doc-item strong,
+.knowledge-doc-item span,
+.knowledge-doc-item small {
+  display: block;
+}
+
+.knowledge-doc-item span,
+.knowledge-doc-item small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.danger-link {
+  justify-self: start;
+  color: var(--danger) !important;
+  font-weight: 800;
+}
+
+.knowledge-editor,
+.rag-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.chunk-preview {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.chunk-preview h3,
+.answer-card h3,
+.citation-list h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.chunk-card,
+.answer-card,
+.citation-card {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.chunk-card strong,
+.citation-card strong {
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+
+.chunk-card p,
+.answer-card p,
+.citation-card p,
+.no-evidence {
+  margin: 0;
+  color: #344238;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chunk-card small,
+.citation-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.warning-card {
+  border-color: #fed7aa;
+  background: #fffaf0;
+}
+
+.citation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.citation-meta strong {
+  margin-right: 4px;
+}
+
+.citation-meta span {
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: #526258;
+  background: #eef3ef;
+  font-weight: 800;
+}
+
+mark {
+  padding: 0 3px;
+  border-radius: 4px;
+  color: #14532d;
+  background: #bbf7d0;
+  font-weight: 800;
+}
+
+.rag-question {
+  display: grid;
+  gap: 10px;
+}
+
+.rag-question button {
+  justify-self: start;
+}
+
+.rag-prompt {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.rag-prompt summary {
+  color: var(--accent-strong);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.rag-prompt pre {
+  margin: 10px 0 0;
+  color: #344238;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.confidence {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8faf8;
+  color: #344238;
+  font-weight: 800;
+}
+
+.confidence.high,
+.confidence.medium {
+  border-color: #b7e4c7;
+  background: #ecfdf3;
+  color: var(--accent-strong);
+}
+
+.confidence.low,
+.confidence.none {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #7c2d12;
+}
+
+.empty-state.compact {
+  min-height: 140px;
+}
+
 @media (max-width: 1320px) {
   .candidate-workbench {
     grid-template-columns: 1fr;
@@ -1831,11 +2069,16 @@ tbody tr.selected {
 
   .ai-workbench,
   .ai-summary-bar,
-  .ai-core-grid {
+  .ai-core-grid,
+  .knowledge-hero,
+  .knowledge-layout,
+  .answer-sections {
     grid-template-columns: 1fr;
   }
 
-  .ai-candidate-list {
+  .ai-candidate-list,
+  .knowledge-doc-list,
+  .rag-panel {
     position: static;
     max-height: none;
   }
