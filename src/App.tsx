@@ -1,15 +1,30 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import type { AiSettings } from './types/ai'
+import type { AgentRun, AgentWorkflowType, RagResult } from './types/agent'
+import { agentConfidenceLabels, agentRecommendationLabels, agentWorkflowLabels } from './types/agent'
 import type { Candidate, CandidateDraft, CandidateStatus, ProbationStatus } from './types/candidate'
 import { probationLabels, statusLabels } from './types/candidate'
 import type { KnowledgeDocument, KnowledgeDocumentType, RagQuery } from './types/knowledge'
 import { knowledgeDocumentTypeLabels } from './types/knowledge'
-import { loadAiSettings, loadCandidates, loadKnowledgeDocuments, saveAiSettings, saveKnowledgeDocuments } from './utils/storage'
+import { agentDemoCandidates, agentDemoKnowledgeDocuments } from './data/agentDemoData'
+import {
+  clearStoredAgentRecords,
+  loadAgentRuns,
+  loadAiSettings,
+  loadCandidates,
+  loadKnowledgeDocuments,
+  loadLastActiveAgentRunId,
+  saveAgentRuns,
+  saveAiSettings,
+  saveKnowledgeDocuments,
+  saveLastActiveAgentRunId,
+} from './utils/storage'
 import { analyzeCandidateWithSettings } from './utils/realAi'
 import { cleanPosition, extractResumeInfo, getExtractedFieldLabels } from './utils/resumeExtractor'
 import { cleanResumeText, parseResumeFile } from './utils/resumeParser'
 import { createKnowledgeDocument, queryKnowledgeBase, RAG_SYSTEM_PROMPT } from './utils/knowledgeRag'
+import { runRecruitingAgent } from './utils/recruitingAgent'
 import { formatDateTime } from './utils/date'
 import {
   createCandidate as createCandidateRecord,
@@ -21,13 +36,14 @@ import {
 import { isSupabaseConfigured, supabase } from './services/supabaseClient'
 import {
   getFunnelAnalytics,
+  getAgentAnalytics,
   getOverview,
   getPeriodAnalytics,
   getRoleAnalytics,
   getSourceAnalytics,
 } from './utils/analytics'
 
-type ViewKey = 'dashboard' | 'candidates' | 'pipeline' | 'ai' | 'analytics' | 'knowledge' | 'notes'
+type ViewKey = 'dashboard' | 'candidates' | 'pipeline' | 'ai' | 'agent' | 'analytics' | 'knowledge' | 'notes'
 type StatusFilter = CandidateStatus | 'all' | 'archived'
 type ProbationFilter = ProbationStatus | 'all'
 type ArchiveFilter = 'all' | 'active' | 'archived'
@@ -37,6 +53,7 @@ const navigation: { key: ViewKey; label: string; icon: string }[] = [
   { key: 'candidates', label: '候选人库', icon: '▦' },
   { key: 'pipeline', label: '面试流程', icon: '↳' },
   { key: 'ai', label: 'AI 分析', icon: '✦' },
+  { key: 'agent', label: '招聘分析 Agent', icon: '◆' },
   { key: 'analytics', label: '数据看板', icon: '◫' },
   { key: 'knowledge', label: '招聘知识库', icon: '◎' },
   { key: 'notes', label: 'MVP 说明', icon: 'i' },
@@ -81,6 +98,8 @@ function App() {
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [aiSettings, setAiSettings] = useState<AiSettings>(() => loadAiSettings())
   const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>(() => loadKnowledgeDocuments())
+  const [agentRuns, setAgentRuns] = useState<AgentRun[]>(() => loadAgentRuns())
+  const [lastActiveAgentRunId, setLastActiveAgentRunId] = useState(() => loadLastActiveAgentRunId())
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [operationError, setOperationError] = useState('')
 
@@ -91,6 +110,7 @@ function App() {
   const sourceAnalytics = useMemo(() => getSourceAnalytics(candidates), [candidates])
   const weeklyAnalytics = useMemo(() => getPeriodAnalytics(candidates, 'week'), [candidates])
   const monthlyAnalytics = useMemo(() => getPeriodAnalytics(candidates, 'month'), [candidates])
+  const agentAnalytics = useMemo(() => getAgentAnalytics(agentRuns, candidates), [agentRuns, candidates])
   const roles = useMemo(() => ['全部岗位', ...Array.from(new Set(candidates.map((candidate) => candidate.targetRole)))], [candidates])
   const sources = useMemo(() => ['全部来源', ...Array.from(new Set(candidates.map((candidate) => candidate.source)))], [candidates])
 
@@ -163,6 +183,60 @@ function App() {
   function persistKnowledgeDocuments(nextDocuments: KnowledgeDocument[]) {
     setKnowledgeDocuments(nextDocuments)
     saveKnowledgeDocuments(nextDocuments)
+  }
+
+  function persistAgentRuns(nextRuns: AgentRun[]) {
+    setAgentRuns(nextRuns)
+    saveAgentRuns(nextRuns)
+  }
+
+  function persistLastActiveAgentRunId(runId: string) {
+    setLastActiveAgentRunId(runId)
+    saveLastActiveAgentRunId(runId)
+  }
+
+  function clearAgentRecords() {
+    clearStoredAgentRecords()
+    setAgentRuns([])
+    setLastActiveAgentRunId('')
+  }
+
+  async function loadAgentDemoData() {
+    setOperationError('')
+    try {
+      const demoDocuments = agentDemoKnowledgeDocuments
+        .filter((demoDocument) =>
+          !knowledgeDocuments.some((document) => document.id === demoDocument.id || document.title === demoDocument.title),
+        )
+        .map((demoDocument) =>
+          createKnowledgeDocument({
+            title: demoDocument.title,
+            type: demoDocument.type,
+            content: demoDocument.content,
+            existingId: demoDocument.id,
+          }),
+        )
+      const retainedDocuments = knowledgeDocuments.filter((document) => !isLowQualityKnowledgeDocument(document))
+      if (demoDocuments.length > 0 || retainedDocuments.length !== knowledgeDocuments.length) {
+        persistKnowledgeDocuments([...demoDocuments, ...retainedDocuments])
+      }
+
+      for (const demoCandidate of agentDemoCandidates) {
+        if (candidates.some((candidate) => candidate.name === demoCandidate.name && candidate.targetRole === demoCandidate.targetRole)) continue
+        const { id: _id, ...candidateInput } = demoCandidate
+        await createCandidateRecord(candidateInput)
+      }
+      await refreshCandidates()
+      setActiveView('agent')
+    } catch (error) {
+      setOperationError(getOperationErrorMessage(error))
+    }
+  }
+
+  function isLowQualityKnowledgeDocument(document: KnowledgeDocument) {
+    const normalized = `${document.title}${document.content}`.replace(/\s+/g, '')
+    const chineseCount = (normalized.match(/[\u4e00-\u9fa5]/g) ?? []).length
+    return chineseCount < 20 || /^[\d\W_]+$/u.test(normalized)
   }
 
   async function generateAnalysis(input: Pick<Candidate, 'targetRole' | 'resumeText'> & Partial<Candidate>) {
@@ -488,6 +562,7 @@ function App() {
             onDelete={deleteCandidate}
             onUpdate={updateCandidate}
             onRefreshAnalysis={refreshCandidateAnalysis}
+            agentRuns={agentRuns}
           />
         )}
 
@@ -503,6 +578,19 @@ function App() {
           />
         )}
 
+        {activeView === 'agent' && (
+          <RecruitingAgentView
+            candidates={candidates}
+            knowledgeDocuments={knowledgeDocuments}
+            agentRuns={agentRuns}
+            onSaveRuns={persistAgentRuns}
+            lastActiveAgentRunId={lastActiveAgentRunId}
+            onSetLastActiveRunId={persistLastActiveAgentRunId}
+            onLoadDemoData={loadAgentDemoData}
+            onClearAgentRecords={clearAgentRecords}
+          />
+        )}
+
         {activeView === 'analytics' && (
           <AnalyticsView
             overview={overview}
@@ -511,6 +599,7 @@ function App() {
             sourceAnalytics={sourceAnalytics}
             weeklyAnalytics={weeklyAnalytics}
             monthlyAnalytics={monthlyAnalytics}
+            agentAnalytics={agentAnalytics}
           />
         )}
 
@@ -783,6 +872,7 @@ function CandidatesView(props: {
   onDelete: (id: string) => void
   onUpdate: (id: string, patch: Partial<Candidate>) => void
   onRefreshAnalysis: (candidate: Candidate, patch?: Partial<Candidate>) => void
+  agentRuns: AgentRun[]
 }) {
   const [detailCandidateId, setDetailCandidateId] = useState<string | null>(null)
   const detailCandidate = props.allCandidates.find((candidate) => candidate.id === detailCandidateId)
@@ -934,6 +1024,7 @@ function CandidatesView(props: {
           onClose={() => setDetailCandidateId(null)}
           onEdit={props.onEdit}
           onRefreshAnalysis={props.onRefreshAnalysis}
+          agentRuns={props.agentRuns.filter((run) => run.candidateId === detailCandidate.id)}
         />
       )}
     </section>
@@ -957,11 +1048,13 @@ function CandidateDetailDrawer({
   onClose,
   onEdit,
   onRefreshAnalysis,
+  agentRuns,
 }: {
   candidate: Candidate
   onClose: () => void
   onEdit: (candidate: Candidate) => void
   onRefreshAnalysis: (candidate: Candidate, patch?: Partial<Candidate>) => void
+  agentRuns: AgentRun[]
 }) {
   const [isResumeExpanded, setIsResumeExpanded] = useState(false)
 
@@ -1022,6 +1115,8 @@ function CandidateDetailDrawer({
             <li>推荐结论：{candidate.recommendedConclusion ?? '待分析'}</li>
           </ul>
         </section>
+
+        <AgentReportHistory agentRuns={agentRuns} compact />
 
         <section className="drawer-section">
           <h3>JD 文本</h3>
@@ -1671,6 +1766,7 @@ function AnalyticsView({
   sourceAnalytics,
   weeklyAnalytics,
   monthlyAnalytics,
+  agentAnalytics,
 }: {
   overview: ReturnType<typeof getOverview>
   roleAnalytics: ReturnType<typeof getRoleAnalytics>
@@ -1678,11 +1774,20 @@ function AnalyticsView({
   sourceAnalytics: ReturnType<typeof getSourceAnalytics>
   weeklyAnalytics: ReturnType<typeof getPeriodAnalytics>
   monthlyAnalytics: ReturnType<typeof getPeriodAnalytics>
+  agentAnalytics: ReturnType<typeof getAgentAnalytics>
 }) {
   return (
     <section className="stack">
       <div className="metric-grid analytics-metrics">
         <Metric label="已归档人数" value={overview.archived} hint="已归档但保留原始面试结果" />
+        <Metric label="Agent 分析次数" value={agentAnalytics.totalRuns} hint="已完成 / 已保存报告" />
+        <Metric label="已分析候选人" value={agentAnalytics.analyzedCandidates} hint="按 candidateId 去重，取最新有效报告" />
+        <Metric label="建议进入面试人数" value={agentAnalytics.recommended} hint="按候选人最新报告统计" />
+        <Metric label="谨慎推进人数" value={agentAnalytics.cautious} hint="按候选人最新报告统计" />
+        <Metric label="暂不推进人数" value={agentAnalytics.notRecommended} hint="按候选人最新报告统计" />
+        <Metric label="需重点复核候选人" value={agentAnalytics.priorityReviewCandidates} hint="低匹配、暂不推进、依据不足或严重风险" tone="risk" />
+        <Metric label="知识库引用次数" value={agentAnalytics.citationCount} hint="Agent 报告引用片段" />
+        <Metric label="HR 人工确认率" value={`${agentAnalytics.humanConfirmRate}%`} hint="已人工确认 / 报告数" />
       </div>
       <div className="two-column">
         <section className="panel">
@@ -1768,6 +1873,48 @@ function AnalyticsView({
         <PeriodPanel title="周度面试情况分析" data={weeklyAnalytics} />
         <PeriodPanel title="月度面试情况分析" data={monthlyAnalytics} />
       </div>
+      <div className="two-column">
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>各岗位 Agent 平均匹配度</h2>
+              <p>基于已保存 / 已完成 Agent 报告统计。</p>
+            </div>
+          </div>
+          <div className="source-list">
+            {agentAnalytics.averageMatchByRole.length === 0 ? (
+              <EmptyState title="暂无 Agent 匹配度数据" description="保存候选人初筛或面试后评审报告后会显示。" />
+            ) : (
+              agentAnalytics.averageMatchByRole.map((item) => (
+                <div className="source-item" key={item.role}>
+                  <div>
+                    <strong>{item.role}</strong>
+                    <span>{item.total} 名候选人</span>
+                  </div>
+                  <b>{item.averageMatchScore}</b>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>常见短板与风险关键词</h2>
+              <p>用于复盘岗位要求、面试标准和知识库覆盖情况。</p>
+            </div>
+          </div>
+          <div className="tag-cloud">
+            {[...agentAnalytics.commonWeaknessKeywords, ...agentAnalytics.commonRiskKeywords].length === 0 ? (
+              <span>暂无关键词</span>
+            ) : (
+              [...agentAnalytics.commonWeaknessKeywords, ...agentAnalytics.commonRiskKeywords].map((item) => (
+                <span key={`${item.keyword}-${item.count}`}>{item.keyword} · {item.count}</span>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
     </section>
   )
 }
@@ -1799,6 +1946,599 @@ function PeriodPanel({ title, data }: { title: string; data: ReturnType<typeof g
       </div>
     </section>
   )
+}
+
+function RecruitingAgentView({
+  candidates,
+  knowledgeDocuments,
+  agentRuns,
+  onSaveRuns,
+  lastActiveAgentRunId,
+  onSetLastActiveRunId,
+  onLoadDemoData,
+  onClearAgentRecords,
+}: {
+  candidates: Candidate[]
+  knowledgeDocuments: KnowledgeDocument[]
+  agentRuns: AgentRun[]
+  onSaveRuns: (runs: AgentRun[]) => void
+  lastActiveAgentRunId: string
+  onSetLastActiveRunId: (runId: string) => void
+  onLoadDemoData: () => Promise<void>
+  onClearAgentRecords: () => void
+}) {
+  const initialActiveRun = agentRuns.find((run) => run.id === lastActiveAgentRunId) ?? null
+  const [candidateId, setCandidateId] = useState(initialActiveRun?.candidateId ?? candidates[0]?.id ?? '')
+  const [workflowType, setWorkflowType] = useState<AgentWorkflowType>(initialActiveRun?.workflowType ?? 'candidate_screening')
+  const [jdText, setJdText] = useState(initialActiveRun?.jdText ?? candidates[0]?.jdText ?? '')
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>(initialActiveRun?.selectedKnowledgeDocIds ?? [])
+  const [currentRun, setCurrentRun] = useState<AgentRun | null>(initialActiveRun)
+  const [hrNote, setHrNote] = useState(initialActiveRun?.hrNote ?? '')
+  const [humanConfirmed, setHumanConfirmed] = useState(Boolean(initialActiveRun?.humanConfirmed))
+  const [restoreMessage, setRestoreMessage] = useState(() => {
+    if (!initialActiveRun) return ''
+    return initialActiveRun.status === 'saved' ? '已恢复上次 Agent 分析结果。' : '已恢复上次未保存的 Agent 分析结果。'
+  })
+  const [isConfigDirty, setIsConfigDirty] = useState(false)
+
+  const selectedCandidate = candidates.find((candidate) => candidate.id === candidateId)
+  const relatedRuns = selectedCandidate ? agentRuns.filter((run) => run.candidateId === selectedCandidate.id) : agentRuns.slice(0, 6)
+
+  useEffect(() => {
+    const restoredRun = agentRuns.find((run) => run.id === lastActiveAgentRunId)
+    if (!restoredRun) return
+    const restoredDocIds = restoredRun.selectedKnowledgeDocIds ?? []
+    if (currentRun?.id === restoredRun.id) return
+
+    setCurrentRun(restoredRun)
+    setHrNote(restoredRun.hrNote ?? '')
+    setHumanConfirmed(Boolean(restoredRun.humanConfirmed))
+    setCandidateId(restoredRun.candidateId ?? '')
+    setWorkflowType(restoredRun.workflowType)
+    setJdText(restoredRun.jdText)
+    setSelectedDocIds(restoredDocIds)
+    setRestoreMessage(restoredRun.status === 'saved' ? '已恢复上次 Agent 分析结果。' : '已恢复上次未保存的 Agent 分析结果。')
+    setIsConfigDirty(false)
+  }, [agentRuns, currentRun, lastActiveAgentRunId])
+
+  useEffect(() => {
+    if (!currentRun || currentRun.status === 'saved') return
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = '当前 Agent 分析尚未保存，刷新后可能丢失，是否继续？'
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [currentRun])
+
+  function toggleDocument(documentId: string) {
+    setSelectedDocIds((current) => {
+      const next = current.includes(documentId) ? current.filter((id) => id !== documentId) : [...current, documentId]
+      markConfigDirty()
+      return next
+    })
+  }
+
+  function markConfigDirty() {
+    if (currentRun) {
+      setIsConfigDirty(true)
+      setRestoreMessage('')
+    }
+  }
+
+  function changeCandidate(nextCandidateId: string) {
+    setCandidateId(nextCandidateId)
+    const candidate = candidates.find((item) => item.id === nextCandidateId)
+    setJdText(candidate?.jdText || candidate?.targetRole || '')
+    markConfigDirty()
+  }
+
+  function changeWorkflowType(nextWorkflowType: AgentWorkflowType) {
+    setWorkflowType(nextWorkflowType)
+    markConfigDirty()
+  }
+
+  function changeJdText(nextJdText: string) {
+    setJdText(nextJdText)
+    markConfigDirty()
+  }
+
+  function runAgent() {
+    const run = runRecruitingAgent({
+      workflowType,
+      candidate: selectedCandidate,
+      jdText: jdText || selectedCandidate?.jdText || selectedCandidate?.targetRole || '',
+      knowledgeDocuments,
+      selectedKnowledgeDocIds: selectedDocIds,
+    })
+    setCurrentRun(run)
+    setHrNote('')
+    setHumanConfirmed(false)
+    onSaveRuns([run, ...agentRuns.filter((item) => item.id !== run.id)])
+    onSetLastActiveRunId(run.id)
+    setRestoreMessage('')
+    setIsConfigDirty(false)
+  }
+
+  function resetAgent() {
+    setCurrentRun(null)
+    setHrNote('')
+    setHumanConfirmed(false)
+    onSetLastActiveRunId('')
+    setRestoreMessage('')
+    setIsConfigDirty(false)
+  }
+
+  function saveReport() {
+    if (!currentRun) return
+    const savedRun: AgentRun = {
+      ...currentRun,
+      status: 'saved',
+      hrNote,
+      humanConfirmed,
+      updatedAt: new Date().toISOString(),
+    }
+    const nextRuns = [savedRun, ...agentRuns.filter((run) => run.id !== savedRun.id)]
+    onSaveRuns(nextRuns)
+    onSetLastActiveRunId(savedRun.id)
+    setCurrentRun(savedRun)
+    setRestoreMessage('')
+    setIsConfigDirty(false)
+  }
+
+  function updateCurrentRunDraft(patch: Partial<Pick<AgentRun, 'hrNote' | 'humanConfirmed'>>) {
+    if (!currentRun) return
+    const nextRun: AgentRun = {
+      ...currentRun,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    }
+    setCurrentRun(nextRun)
+    onSaveRuns([nextRun, ...agentRuns.filter((run) => run.id !== nextRun.id)])
+    onSetLastActiveRunId(nextRun.id)
+  }
+
+  function changeHrNote(value: string) {
+    setHrNote(value)
+    updateCurrentRunDraft({ hrNote: value })
+  }
+
+  function changeHumanConfirmed(value: boolean) {
+    setHumanConfirmed(value)
+    updateCurrentRunDraft({ humanConfirmed: value })
+  }
+
+  function clearAgentRecordsSafely() {
+    const shouldClear = confirm('确定清理 Agent 测试记录吗？这只会清理 AgentRun / AgentReport，不会删除候选人和知识库文档。')
+    if (!shouldClear) return
+    onClearAgentRecords()
+    setCurrentRun(null)
+    setHrNote('')
+    setHumanConfirmed(false)
+    setRestoreMessage('')
+    setIsConfigDirty(false)
+  }
+
+  async function loadDemoDataSafely() {
+    if (currentRun && currentRun.status !== 'saved') {
+      const shouldContinue = confirm('加载演示数据可能覆盖当前未保存分析，是否继续？')
+      if (!shouldContinue) return
+    }
+    if (agentRuns.length > 0) {
+      const shouldClearRecords = confirm('当前已有 Agent 测试记录。是否先清理旧记录，避免演示统计数字膨胀？')
+      if (shouldClearRecords) {
+        onClearAgentRecords()
+        setCurrentRun(null)
+        setHrNote('')
+        setHumanConfirmed(false)
+        setRestoreMessage('')
+        setIsConfigDirty(false)
+      }
+    }
+    await onLoadDemoData()
+    setSelectedDocIds(agentDemoKnowledgeDocuments.map((document) => document.id))
+    markConfigDirty()
+  }
+
+  return (
+    <section className="agent-page">
+      <div className="agent-hero panel">
+        <div>
+          <p className="eyebrow">HR 招聘分析 Agent 自动化工作流 MVP</p>
+          <h2>招聘分析 Agent 工作台</h2>
+          <p>
+            基于候选人资料、岗位 JD 与招聘知识库，自动生成初筛、追问与面试评审建议，最终由 HR 人工确认。
+          </p>
+        </div>
+        <div className="agent-warning">
+          AI 输出仅作为招聘辅助建议，不作为最终人选决策。
+        </div>
+      </div>
+
+      <AgentRunSummaryCards run={currentRun} humanConfirmed={humanConfirmed || Boolean(currentRun?.humanConfirmed)} />
+
+      {restoreMessage && (
+        <div className="agent-restore-notice">
+          {restoreMessage}
+        </div>
+      )}
+
+      {isConfigDirty && (
+        <div className="agent-dirty-notice">
+          配置已变更，建议重新运行 Agent。
+        </div>
+      )}
+
+      <div className="agent-workspace">
+        <aside className="panel agent-config">
+          <div className="panel-header">
+            <div>
+              <h2>输入与配置</h2>
+              <p>选择候选人、JD、知识库和固定工作流。</p>
+            </div>
+          </div>
+          <button className="secondary" type="button" onClick={loadDemoDataSafely}>
+            加载 Agent 演示数据
+          </button>
+          <button className="danger secondary" type="button" onClick={clearAgentRecordsSafely}>
+            清理 Agent 测试记录
+          </button>
+          <label>
+            选择候选人
+            <select value={candidateId} onChange={(event) => changeCandidate(event.target.value)}>
+              <option value="">不选择候选人，仅分析 JD</option>
+              {candidates.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.name} · {candidate.targetRole}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Agent 工作流类型
+            <select value={workflowType} onChange={(event) => changeWorkflowType(event.target.value as AgentWorkflowType)}>
+              {Object.entries(agentWorkflowLabels).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            岗位 JD
+            <textarea
+              rows={8}
+              value={jdText}
+              onChange={(event) => changeJdText(event.target.value)}
+              placeholder="粘贴岗位职责、任职要求或从候选人档案带入 JD。"
+            />
+          </label>
+          <div className="agent-doc-picker">
+            <strong>选择招聘知识库文档</strong>
+            {knowledgeDocuments.length === 0 ? (
+              <p className="no-evidence">暂无知识文档，可先到“招聘知识库”上传 JD / 面试标准 / 招聘 FAQ。</p>
+            ) : (
+              knowledgeDocuments.map((document) => (
+                <label key={document.id} className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={selectedDocIds.includes(document.id)}
+                    onChange={() => toggleDocument(document.id)}
+                  />
+                  <span>{document.title} · {knowledgeDocumentTypeLabels[document.type]}</span>
+                </label>
+              ))
+            )}
+          </div>
+          <div className="agent-actions">
+            <button className="primary" type="button" onClick={runAgent}>
+              运行 Agent 分析
+            </button>
+            <button className="secondary" type="button" onClick={resetAgent}>
+              重置
+            </button>
+          </div>
+        </aside>
+
+        <section className="panel agent-steps">
+          <div className="panel-header">
+            <div>
+              <h2>Agent 执行步骤</h2>
+              <p>展示每一步状态、摘要、RAG 使用情况和置信度。</p>
+            </div>
+          </div>
+          {!currentRun ? (
+            <EmptyState title="尚未运行 Agent" description="配置候选人、JD 和知识库后，点击“运行 Agent 分析”。" />
+          ) : (
+            <div className="step-list">
+              {currentRun.steps.map((step, index) => (
+                <article key={step.id} className={`agent-step ${step.status}`}>
+                  <div className="step-index">{index + 1}</div>
+                  <div>
+                    <div className="step-title-row">
+                      <strong>{step.title}</strong>
+                      <span className={`step-status ${step.status}`}>{getAgentStepStatusLabel(step.status)}</span>
+                      <ConfidenceBadge confidence={step.confidence} />
+                    </div>
+                    <p>{step.outputSummary}</p>
+                    <small>{step.usedRag ? '使用知识库依据' : '基于输入资料 / AI 辅助整理'} · {step.description}</small>
+                    {step.keyFindings.length > 0 && (
+                      <ul>
+                        {step.keyFindings.slice(0, 2).map((finding) => (
+                          <li key={finding}>{finding}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel agent-rag">
+          <div className="panel-header">
+            <div>
+              <h2>知识库引用来源</h2>
+              <p>展示命中的文档、chunk、关键词、相关性和是否进入最终报告。</p>
+            </div>
+          </div>
+          {!currentRun ? (
+            <EmptyState title="暂无引用来源" description="运行 Agent 后会显示本次命中的知识库片段。" />
+          ) : currentRun.ragResults.length === 0 ? (
+            <p className="no-evidence">当前知识库依据不足，不能生成确定结论。以下内容仅可作为辅助思路，请 HR 结合实际情况判断。</p>
+          ) : (
+            <div className="agent-citations">
+              {currentRun.ragResults.map((result) => (
+                <RagResultCard key={result.id} result={result} />
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+
+      <section className="panel agent-report-panel">
+        <div className="panel-header">
+          <div>
+            <h2>AI 辅助评审报告</h2>
+            <p>报告区分候选人资料、JD / 知识库依据、AI 推断和 HR 人工确认项。</p>
+          </div>
+          {currentRun && (
+            <div className="report-actions">
+              <button className="secondary" onClick={runAgent}>重新运行</button>
+              <button className="primary" onClick={saveReport}>
+                {currentRun.status === 'saved' ? '已保存到候选人详情' : selectedCandidate ? '保存报告到候选人详情' : '保存 Agent 报告'}
+              </button>
+            </div>
+          )}
+        </div>
+        {!currentRun ? (
+          <EmptyState title="暂无报告" description="运行任一固定 Agent 工作流后，会在这里生成结构化报告。" />
+        ) : (
+          <AgentReportPanel
+            run={currentRun}
+            hrNote={hrNote}
+            humanConfirmed={humanConfirmed}
+            onHrNoteChange={changeHrNote}
+            onHumanConfirmedChange={changeHumanConfirmed}
+          />
+        )}
+      </section>
+
+      <AgentReportHistory agentRuns={relatedRuns} />
+    </section>
+  )
+}
+
+function AgentRunSummaryCards({ run, humanConfirmed }: { run: AgentRun | null; humanConfirmed: boolean }) {
+  return (
+    <div className="agent-summary-cards">
+      <Metric
+        label="推荐结论"
+        value={run ? agentRecommendationLabels[run.finalReport.recommendation] : '待运行'}
+        hint="推荐 / 谨慎推进 / 暂不推荐 / 信息不足"
+      />
+      <Metric
+        label="匹配度"
+        value={run && typeof run.finalReport.matchScore === 'number' ? run.finalReport.matchScore : '-'}
+        hint="0-100，仅为辅助评分"
+      />
+      <Metric
+        label="RAG 置信度"
+        value={run ? agentConfidenceLabels[run.finalReport.confidence] : '-'}
+        hint={run?.ragResults.length ? `${run.ragResults.length} 条有效引用` : '暂无有效引用'}
+      />
+      <Metric
+        label="HR 确认状态"
+        value={humanConfirmed ? '已确认' : '待确认'}
+        hint="最终由 HR / 用人部门判断"
+      />
+    </div>
+  )
+}
+
+function AgentReportPanel({
+  run,
+  hrNote,
+  humanConfirmed,
+  onHrNoteChange,
+  onHumanConfirmedChange,
+}: {
+  run: AgentRun
+  hrNote: string
+  humanConfirmed: boolean
+  onHrNoteChange: (value: string) => void
+  onHumanConfirmedChange: (value: boolean) => void
+}) {
+  const report = run.finalReport
+  return (
+    <div className="agent-report">
+      <section className="report-executive-summary">
+        <div className="report-summary-head">
+          <div>
+            <p className="eyebrow">{agentWorkflowLabels[run.workflowType]} · {run.candidateName || run.jobTitle || '未绑定候选人'}</p>
+            <h3>报告摘要</h3>
+          </div>
+          <span className={`recommendation ${report.recommendation}`}>{agentRecommendationLabels[report.recommendation]}</span>
+        </div>
+        <div className="report-summary-mini-grid">
+          <ProfileField label="推荐结论" value={agentRecommendationLabels[report.recommendation]} />
+          <ProfileField label="匹配度评分" value={`${report.matchScore ?? '-'} / 100`} />
+          <ProfileField label="RAG 置信度" value={agentConfidenceLabels[report.confidence]} />
+          <ProfileField label="HR 确认状态" value={humanConfirmed ? '已确认' : '待确认'} />
+        </div>
+        <div className="report-detail-grid compact">
+          <InfoBlock title="核心匹配点 3 条" items={ensureListSize(report.strengths, 3)} />
+          <InfoBlock title="主要短板 3 条" items={ensureListSize(report.weaknesses, 3)} />
+          <InfoBlock title="主要风险 3 条" items={ensureListSize(report.risks, 3)} />
+          <InfoBlock title="建议追问 3-5 条" items={ensureListSize(report.interviewQuestions, 3).slice(0, 5)} />
+        </div>
+        <InfoBlock title="HR 需确认事项" items={[report.sections.humanReviewRequired]} />
+      </section>
+      {report.confidence === 'none' && (
+        <p className="no-evidence">当前知识库依据不足，不能生成确定结论。以下内容仅可作为辅助思路，请 HR 结合实际情况判断。</p>
+      )}
+      <details className="report-details">
+        <summary>查看详细报告</summary>
+        <div className="answer-sections">
+          <section className="answer-card">
+            <h3>基于候选人资料的判断</h3>
+            <p>{report.sections.candidateBasedJudgement}</p>
+          </section>
+          <section className="answer-card">
+            <h3>基于 JD / 知识库的依据</h3>
+            <p>{report.sections.jdAndKnowledgeBaseEvidence}</p>
+          </section>
+          <section className="answer-card">
+            <h3>AI 推断与建议</h3>
+            <p>{report.sections.aiInferenceAndSuggestions}</p>
+          </section>
+          <section className="answer-card warning-card">
+            <h3>需要 HR 人工确认的内容</h3>
+            <p>{report.sections.humanReviewRequired}</p>
+          </section>
+        </div>
+        {report.probationFocus.length > 0 && <InfoBlock title="试用期关注点" items={report.probationFocus} />}
+      </details>
+      <section className="hr-confirmation">
+        <h3>HR 人工确认</h3>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={humanConfirmed} onChange={(event) => onHumanConfirmedChange(event.target.checked)} />
+          <span>我已人工复核候选人资料、JD、知识库依据和 AI 辅助建议。</span>
+        </label>
+        <textarea rows={4} value={hrNote} onChange={(event) => onHrNoteChange(event.target.value)} placeholder="填写 HR 修改备注、补充判断或待确认问题。" />
+        <p>{report.finalNote}</p>
+      </section>
+    </div>
+  )
+}
+
+function ensureListSize(items: string[], minSize: number) {
+  if (items.length >= minSize) return items.slice(0, minSize)
+  return [...items, ...Array.from({ length: minSize - items.length }, () => '待补充资料后确认')]
+}
+
+function AgentReportHistory({ agentRuns, compact }: { agentRuns: AgentRun[]; compact?: boolean }) {
+  const runsWithVersion = getAgentRunsWithVersion(agentRuns)
+  const visibleLimit = compact ? 3 : 5
+  const visibleRuns = runsWithVersion.slice(0, visibleLimit)
+  const hiddenRuns = runsWithVersion.slice(visibleLimit)
+  return (
+    <section className={compact ? 'drawer-section agent-history compact' : 'panel agent-history'}>
+      <h3>Agent 评审记录</h3>
+      {visibleRuns.length === 0 ? (
+        <p className="no-evidence">暂无已保存 Agent 报告。</p>
+      ) : (
+        <div className="agent-history-list">
+          {visibleRuns.map((item) => (
+            <AgentHistoryItem key={item.run.id} run={item.run} version={item.version} />
+          ))}
+          {hiddenRuns.length > 0 && (
+            <details className="agent-history-more">
+              <summary>查看全部历史记录（{hiddenRuns.length} 条）</summary>
+              <div className="agent-history-list">
+                {hiddenRuns.map((item) => (
+                  <AgentHistoryItem key={item.run.id} run={item.run} version={item.version} />
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function AgentHistoryItem({ run, version }: { run: AgentRun; version: number }) {
+  return (
+    <details className="agent-history-item">
+      <summary>
+        <span>
+          <strong>{agentWorkflowLabels[run.workflowType]} v{version}</strong>
+          <small>{formatDateTime(run.createdAt)} · {run.jobTitle}</small>
+        </span>
+        <span className={`recommendation ${run.finalReport.recommendation}`}>
+          {agentRecommendationLabels[run.finalReport.recommendation]}
+        </span>
+      </summary>
+      <div className="history-detail">
+        <p>匹配度评分：{run.finalReport.matchScore ?? '-'} / 100</p>
+        <p>HR 确认状态：{run.humanConfirmed ? '已确认' : '待确认'}</p>
+        <p>保存状态：{run.status === 'saved' ? '已保存' : '已完成未保存'}</p>
+        <p>风险标签：{run.finalReport.risks.slice(0, 3).join('；') || '暂无'}</p>
+        <p>HR 备注：{run.hrNote || '暂无备注'}</p>
+        <p>{run.finalReport.sections.aiInferenceAndSuggestions}</p>
+      </div>
+    </details>
+  )
+}
+
+function getAgentRunsWithVersion(agentRuns: AgentRun[]) {
+  const sortedAscending = [...agentRuns].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const counters = new Map<string, number>()
+  const versions = new Map<string, number>()
+
+  sortedAscending.forEach((run) => {
+    const key = `${run.candidateId || 'no-candidate'}:${run.workflowType}`
+    const nextVersion = (counters.get(key) ?? 0) + 1
+    counters.set(key, nextVersion)
+    versions.set(run.id, nextVersion)
+  })
+
+  return [...agentRuns]
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map((run) => ({ run, version: versions.get(run.id) ?? 1 }))
+}
+
+function RagResultCard({ result }: { result: RagResult }) {
+  return (
+    <article className="citation-card agent-citation-card">
+      <div className="citation-meta">
+        <strong>{result.docTitle}</strong>
+        <span>{knowledgeDocumentTypeLabels[result.docType]}</span>
+        <span>{result.chunkId}</span>
+      </div>
+      <div className="citation-summary">
+        <span>有效命中内容摘要</span>
+        <p>{renderHighlightedText(result.summary, result.matchedKeywords)}</p>
+      </div>
+      <div className="rag-meta-row">
+        <span>命中关键词：{result.matchedKeywords.join('、') || '暂无'}</span>
+        <span>相关性：{result.relevanceScore}</span>
+        <ConfidenceBadge confidence={result.confidence} />
+        <span>{result.usedInFinalReport ? '已被最终报告引用' : '未进入最终报告'}</span>
+      </div>
+    </article>
+  )
+}
+
+function ConfidenceBadge({ confidence }: { confidence: AgentRun['finalReport']['confidence'] }) {
+  return <span className={`confidence-badge ${confidence}`}>置信度：{agentConfidenceLabels[confidence]}</span>
+}
+
+function getAgentStepStatusLabel(status: AgentRun['steps'][number]['status']) {
+  if (status === 'pending') return '等待中'
+  if (status === 'running') return '执行中'
+  if (status === 'completed') return '已完成'
+  return '需人工确认'
 }
 
 function KnowledgeBaseView({
@@ -2140,11 +2880,11 @@ function MvpNotes({
     <section className="panel notes">
       <h2>TalentFlow AI 内部试用版说明</h2>
       <p>
-        本项目是为 AI 产品经理（Vibe Coding 方向）岗位定制的招聘业务系统 MVP，已从纯前端原型迭代为内部试用版方案，用于展示需求拆解、产品流程设计、AI
-        工作流设计和快速落地能力。
+        本项目是为 AI 产品经理（Vibe Coding 方向）岗位定制的 HR 招聘分析 Agent 自动化工作流 MVP，用于展示需求拆解、产品流程设计、AI Agent
+        工作流、RAG 引用依据、AI 输出边界和快速落地能力。
       </p>
       <p className="loop-copy">
-        产品闭环：候选人录入 → 面试安排 → AI 优劣势分析 → 面试评价 → 结果跟进 → 报到/试用期记录 → 岗位与周/月度分析。
+        产品闭环：候选人录入 → 简历导入 → JD 分析 → 招聘知识库 RAG → Agent 初筛 / 追问 / 面试后评审 → HR 人工确认 → 报告沉淀 → 数据看板复盘。
       </p>
       <section className="ai-settings">
         <div>
@@ -2244,7 +2984,9 @@ function MvpNotes({
             <li>默认 AI 服务代理模式，前端不暴露 DeepSeek API Key</li>
             <li>编辑关键字段后标记 AI 分析可能过期，由用户手动重新生成</li>
             <li>招聘流程漏斗、来源质量、岗位、周度、月度招聘数据分析</li>
-            <li>招聘知识库 RAG MVP，支持文档管理、文本切片、关键词检索、带引用来源的问答兜底</li>
+            <li>招聘知识库 RAG MVP，支持文档管理、文本切片、关键词 / 简单相似度 / 文档类型加权 Hybrid 检索、带引用来源的问答兜底</li>
+            <li>招聘分析 Agent 工作台，支持 JD 分析、候选人初筛、面试追问生成和面试后评审 4 个固定工作流</li>
+            <li>Agent 执行步骤、RAG 引用来源、AI 辅助评审报告、HR 人工确认和报告沉淀</li>
             <li>localStorage 本地试用模式，Supabase Auth / Database 内部试用模式</li>
           </ul>
         </div>
@@ -2254,7 +2996,8 @@ function MvpNotes({
             <li>不是商业化 SaaS，不做多租户、计费和复杂组织架构</li>
             <li>权限能力处于内部试用阶段，暂未完整实现面试官 / 管理者协作流程</li>
             <li>简历解析以浏览器本地文本提取为主，暂未接生产级文件存储和审计</li>
-            <li>招聘知识库当前使用关键词检索模拟 RAG，暂未接真实向量库和 Embedding 模型</li>
+            <li>招聘知识库当前使用关键词 / 简单相似度 / 文档类型加权 Hybrid 检索 MVP，暂未接企业级向量数据库</li>
+            <li>Agent 当前为结构化 Mock 工作流，不执行最终录用决策、流程终止或候选人通知动作</li>
             <li>操作日志、通知中心和隐私合规流程仍需后续完善</li>
             <li>不使用真实候选人隐私数据做公开演示</li>
             <li>不允许将真实 API Key 写入前端代码或 GitHub 仓库</li>
@@ -2268,6 +3011,7 @@ function MvpNotes({
             <li>细化 admin / hr / interviewer 权限和 RLS 策略</li>
             <li>通过 Cloudflare Worker 或后端统一代理真实 AI API</li>
             <li>招聘知识库可升级为 Supabase pgvector / Chroma / Pinecone 语义检索，并接入候选人 AI 评审依据选择</li>
+            <li>AgentRun / AgentReport 可接入 Supabase Database、RLS、操作日志和面试官协作流程</li>
             <li>增加面试官在线评价和管理者招聘进度看板</li>
             <li>对接企业微信 / 飞书通知</li>
             <li>增强候选人隐私保护、数据脱敏和访问日志</li>

@@ -1,4 +1,5 @@
 import type { AiSettings } from '../types/ai'
+import type { AgentRun } from '../types/agent'
 import type { Candidate, CandidateStatus } from '../types/candidate'
 import type { KnowledgeDocument } from '../types/knowledge'
 import { analyzeCandidate, hasUsefulResumeText } from './mockAi'
@@ -6,6 +7,9 @@ import { analyzeCandidate, hasUsefulResumeText } from './mockAi'
 const STORAGE_KEY = 'talentflow-ai:candidates'
 const AI_SETTINGS_KEY = 'talentflow-ai:ai-settings'
 const KNOWLEDGE_DOCUMENTS_KEY = 'talentflow-ai:knowledge-documents'
+const AGENT_RUNS_KEY = 'talentflow-ai:agent-runs'
+const LEGACY_AGENT_REPORTS_KEY = 'talentflow-ai:agent-reports'
+const LAST_ACTIVE_AGENT_RUN_KEY = 'talentflow-ai:last-active-agent-run-id'
 
 export const defaultAiSettings: AiSettings = {
   mode: 'default',
@@ -84,6 +88,50 @@ export function loadKnowledgeDocuments(): KnowledgeDocument[] {
 
 export function saveKnowledgeDocuments(documents: KnowledgeDocument[]) {
   localStorage.setItem(KNOWLEDGE_DOCUMENTS_KEY, JSON.stringify(documents))
+}
+
+export function loadAgentRuns(): AgentRun[] {
+  const raw = localStorage.getItem(AGENT_RUNS_KEY)
+  if (!raw) return []
+
+  try {
+    const parsed = JSON.parse(raw) as AgentRun[]
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((run) => run?.id && run?.finalReport)
+      .map((run) => ({
+        ...run,
+        selectedKnowledgeDocIds: Array.isArray(run.selectedKnowledgeDocIds) ? run.selectedKnowledgeDocIds : [],
+        steps: Array.isArray(run.steps) ? run.steps : [],
+        ragResults: Array.isArray(run.ragResults) ? run.ragResults : [],
+        hrNote: run.hrNote ?? '',
+        humanConfirmed: Boolean(run.humanConfirmed),
+      }))
+  } catch {
+    return []
+  }
+}
+
+export function saveAgentRuns(agentRuns: AgentRun[]) {
+  localStorage.setItem(AGENT_RUNS_KEY, JSON.stringify(agentRuns))
+}
+
+export function loadLastActiveAgentRunId() {
+  return localStorage.getItem(LAST_ACTIVE_AGENT_RUN_KEY) ?? ''
+}
+
+export function saveLastActiveAgentRunId(runId: string) {
+  if (!runId) {
+    localStorage.removeItem(LAST_ACTIVE_AGENT_RUN_KEY)
+    return
+  }
+  localStorage.setItem(LAST_ACTIVE_AGENT_RUN_KEY, runId)
+}
+
+export function clearStoredAgentRecords() {
+  localStorage.removeItem(AGENT_RUNS_KEY)
+  localStorage.removeItem(LEGACY_AGENT_REPORTS_KEY)
+  localStorage.removeItem(LAST_ACTIVE_AGENT_RUN_KEY)
 }
 
 function normalizeStoredCandidates(candidates: Candidate[]) {

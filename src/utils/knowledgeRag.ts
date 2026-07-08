@@ -132,6 +132,7 @@ export function retrieveRelevantChunks(question: string, documents: KnowledgeDoc
 
   const allChunks = documents.flatMap((document) => document.chunks)
   const scored = allChunks
+    .filter((chunk) => isMeaningfulKnowledgeChunk(chunk.content))
     .map<ScoredChunk>((chunk) => {
       const content = chunk.content.toLowerCase()
       const keywordHits = questionKeywords.filter((keyword) => chunk.keywords.includes(keyword) || content.includes(keyword))
@@ -141,7 +142,7 @@ export function retrieveRelevantChunks(question: string, documents: KnowledgeDoc
         score: keywordHits.length * 8 + directHitScore + (content.includes(question.toLowerCase()) ? 12 : 0),
       }
     })
-    .filter((chunk) => chunk.score > 0)
+    .filter((chunk) => chunk.score > 0 && isMeaningfulQuote(chunk.content))
     .sort((a, b) => b.score - a.score)
 
   return scored.slice(0, topK)
@@ -215,6 +216,41 @@ function getConfidence(chunks: ScoredChunk[]): RagQuery['confidence'] {
 
 function makeQuote(content: string) {
   return content.replace(/\s+/g, ' ').trim().slice(0, 120)
+}
+
+function isMeaningfulKnowledgeChunk(content: string) {
+  const normalized = content.replace(/\s+/g, '')
+  if (countChineseChars(normalized) < 20) return false
+  if (/^[\d\W_]+$/u.test(normalized)) return false
+  if (!/[a-zA-Z\u4e00-\u9fa5]/.test(normalized)) return false
+  const businessTerms = [
+    '岗位',
+    '职责',
+    '能力',
+    '面试',
+    '候选人',
+    '招聘',
+    '产品',
+    'AI',
+    '流程',
+    '风险',
+    '试用',
+    '评审',
+    '知识库',
+    'JD',
+    '业务',
+    '数据',
+  ]
+  return businessTerms.some((term) => normalized.toLowerCase().includes(term.toLowerCase()))
+}
+
+function isMeaningfulQuote(content: string) {
+  const quote = makeQuote(content)
+  return countChineseChars(quote) >= 20 && !/^[\d\W_]+$/u.test(quote.replace(/\s+/g, ''))
+}
+
+function countChineseChars(text: string) {
+  return (text.match(/[\u4e00-\u9fa5]/g) ?? []).length
 }
 
 function countOccurrences(text: string, keyword: string) {
